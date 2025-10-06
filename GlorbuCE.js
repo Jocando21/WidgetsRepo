@@ -13,13 +13,17 @@
       return (x >>> 0) / 4294967296;
     };
   }
+
   function clamp(n, a, b) {
     return Math.max(a, Math.min(b, n));
   }
+
   function pick(rng, arr) {
     return arr[Math.floor(rng() * arr.length)];
   }
+
   const stopWords = /[^a-z0-9\s']/gi;
+
   function normalize(s) {
     return (s || "")
       .toLowerCase()
@@ -27,14 +31,17 @@
       .replace(/\s+/g, " ")
       .trim();
   }
+
   function tokenize(s) {
     return normalize(s).split(" ").filter(Boolean);
   }
+
   function bow(tokens) {
     const m = new Map();
     for (const t of tokens) m.set(t, (m.get(t) || 0) + 1);
     return m;
   }
+
   function bowCosine(a, b) {
     let dot = 0,
       na = 0,
@@ -46,15 +53,18 @@
     for (const v of b.values()) nb += v * v;
     return !na || !nb ? 0 : dot / Math.sqrt(na * nb);
   }
+
   function titleCase(s) {
     return String(s)
       .split(/\s+/)
       .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
       .join(" ");
   }
+
   function compose(open, core, close) {
     return `${open} ${core} ${close}`.replace(/\s+/g, " ").trim();
   }
+
   function sanitize(text) {
     return String(text)
       .replace(/[\u2014\u2013]+/g, ", ")
@@ -87,11 +97,7 @@
       this._closers = [];
       this._knowledge = [];
       this._faq = [];
-      this._blocks = [
-        "The veil denies me this.",
-        "Such matters are bound by mortal law; I shall not speak.",
-        "Another path must be taken; I will not cross that line.",
-      ];
+      this._blocks = [];
     }
 
     use(addon) {
@@ -152,6 +158,7 @@
             };
         })
         .filter(Boolean);
+
       const addon = {
         install: (core, api) => {
           api.addOpenings(data.openings || []);
@@ -206,6 +213,7 @@
     opening() {
       return this._openings.length ? pick(this.rng, this._openings) : "";
     }
+
     closing() {
       return this._closers.length ? pick(this.rng, this._closers) : "";
     }
@@ -214,15 +222,18 @@
       const q = String(question || "").trim();
       if (!q)
         return {
-          answer: "Speak clearly across the veil.",
+          answer: "",
           intent: "none",
           confidence: 0,
           flags: ["empty"],
         };
+
       for (const re of this._forbid) {
         try {
           if (re instanceof RegExp && re.test(q)) {
-            const block = pick(this.rng, this._blocks);
+            const block = this._blocks.length
+              ? pick(this.rng, this._blocks)
+              : "";
             return {
               answer: block,
               intent: "blocked",
@@ -232,6 +243,7 @@
           }
         } catch (_e) {}
       }
+
       const ctx = {
         q,
         n: normalize(q),
@@ -252,6 +264,7 @@
         blocks: this._blocks,
         utils: { normalize, tokenize, bow, bowCosine, titleCase },
       };
+
       for (const intent of this._intents) {
         try {
           const detected = intent.detect(ctx);
@@ -281,6 +294,7 @@
           }
         } catch (_e) {}
       }
+
       for (const item of this._faq) {
         try {
           if (item.pattern.test(q)) {
@@ -301,20 +315,12 @@
           }
         } catch (_e) {}
       }
-      let text = this._openings.length
-        ? compose(this.opening(), "Unclear—wait and watch.", this.closing())
-        : "Unclear—wait and watch.";
-      for (const t of this._transforms) {
-        try {
-          text = t(ctx, text);
-        } catch (_e) {}
-      }
-      text = sanitize(text);
+
       return {
-        answer: text,
-        intent: "open",
-        confidence: 0.5,
-        flags: ["fallback"],
+        answer: "",
+        intent: "none",
+        confidence: 0,
+        flags: ["no-match"],
       };
     }
   }
