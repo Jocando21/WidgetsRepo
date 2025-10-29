@@ -1,196 +1,304 @@
-const GoalLib = {
-  config: {
-    eventType: "",
-    eventPeriod: "",
-    goalAmount: 0,
-    progress: 0,
-    goalIncreaseAmount: 0,
-    goalReachedAction: "stop",
-    resubs: false,
+/* ===========================================================
+   GoalLib.js — Universal Goal System Library for StreamElements
+   =========================================================== */
+
+(function (global) {
+  const GoalLib = {
+    version: "1.0.0",
     debug: false,
-    multiGoals: false,
-    logTag: "GOALLIB"
-  },
-  goals: {},
-  onGoalUpdate: null,
-  onGoalReached: null,
-  onGoalSaved: null,
-  init(settings = {}) {
-    Object.assign(this.config, settings)
-    if (this.config.multiGoals) this.goals = {}
-    this._log("🧩 Init", this.config)
-  },
-  async onWidgetLoad(payload) {
-    const { eventType, eventPeriod, multiGoals } = this.config
-    const session = payload.detail?.session?.data || {}
-    const type = eventType
-    if (multiGoals) {
-      if (!this.goals[type]) this.goals[type] = { progress: 0, goal: this.config.goalAmount, reached: false }
-    }
-    if (eventPeriod === "custom") {
-      await this._load(type)
-    } else {
-      const index = `${type}-${eventPeriod}`
-      const data = session[index]
-      let progress = 0
-      if (["tip", "cheer", "goal"].includes(type)) progress = data?.amount || 0
-      else if (["subscriber", "follower"].includes(type)) progress = data?.count || 0
-      this._setProgressInternal(progress, type)
-    }
-    const state = this.getState(type)
-    this._log("📦 Load complete", state)
-    return { updated: true, ...state }
-  },
-  async onEvent(payload) {
-    const { eventType, eventPeriod, resubs, multiGoals } = this.config
-    const listener = payload.detail.listener
-    const data = payload.detail.event
-    const type = eventType
-    if (multiGoals && !this.goals[type]) this.goals[type] = { progress: 0, goal: this.config.goalAmount, reached: false }
-    if (listener === "kvstore:update") return { updated: false, reason: "kvstore skip" }
-    let changed = false
-    const amount = Number(data.amount) || 0
-    const gift = data["bulkGifted"]
-    if (listener === "tip-latest" && type === "tip") {
-      this._incProgress(amount, type)
-      changed = true
-    } else if (listener === "cheer-latest" && type === "cheer") {
-      this._incProgress(amount, type)
-      changed = true
-    } else if (listener === "follower-latest" && type === "follower") {
-      this._incProgress(1, type)
-      changed = true
-    } else if (listener === "subscriber-latest" && type === "subscriber") {
-      const isResub = data.amount > 1 || data.cumulativeMonths > 1
-      if (!resubs && isResub && gift !== true) return { updated: false, reason: "resub skipped" }
-      if (gift === undefined) {
-        this._incProgress(1, type)
-        changed = true
+    state: {},
+    listeners: {},
+    alwaysVisibleTimer: null,
+
+    log(...args) {
+      if (GoalLib.debug) console.log("[GoalLib]", ...args);
+    },
+
+    on(event, callback) {
+      if (!GoalLib.listeners[event]) GoalLib.listeners[event] = [];
+      GoalLib.listeners[event].push(callback);
+    },
+
+    emit(event, data) {
+      if (!GoalLib.listeners[event]) return;
+      for (const cb of GoalLib.listeners[event]) cb(data);
+    },
+
+    init(fieldData) {
+      GoalLib.state = {
+        eventType: fieldData.eventType?.value || "follower",
+        eventPeriod: fieldData.eventPeriod?.value || "session",
+        goalAmount: Number(fieldData.goal?.value) || 100,
+        baseGoal: Number(fieldData.goal?.value) || 100,
+        progress: 0,
+        title: fieldData.titleText?.value || "Goal",
+        showSparkles: !!fieldData.showSparkles?.value,
+        showTitle: !!fieldData.showtitle?.value,
+        showProgress: !!fieldData.showprogress?.value,
+        resubs: !!fieldData.resubs?.value,
+        goalReachedAction: fieldData.goalReachedAction?.value || "stop",
+        goalIncreaseAmount: Number(fieldData.goalIncreaseAmount?.value) || 0,
+        roles: (fieldData.roles?.value || "broadcaster,mod")
+          .split(",")
+          .map((r) => r.trim().toLowerCase()),
+        baseCommand: fieldData.baseCommand?.value || "!ticket",
+        eventCurrency: fieldData.currency?.value || "$",
+        textPosition: fieldData.textposition?.value || "bottom",
+        alwaysVisible: fieldData.alwaysVisible?.value || false,
+        widgetVisible: true,
+        goalReached: false,
+      };
+
+      GoalLib.debug = fieldData.debug?.value || false;
+
+      GoalLib.log("Init complete", GoalLib.state);
+      GoalLib.setupListeners();
+      if (GoalLib.state.eventPeriod === "custom") {
+        GoalLib.load();
       }
-    }
-    if (!changed) return { updated: false, reason: "no event match" }
-    if (eventPeriod === "custom") await this._save(type)
-    const state = this.getState(type)
-    if (this.onGoalUpdate) this.onGoalUpdate(state)
-    if (state.goalReached && this.onGoalReached) this.onGoalReached(state)
-    this._log("📈 Event processed", state)
-    return { updated: true, ...state }
-  },
-  getState(type = null) {
-    if (this.config.multiGoals && type) {
-      const g = this.goals[type]
-      const percent = Math.min((g.progress / g.goal) * 100, 100)
-      return { progress: g.progress, goal: g.goal, percent, goalReached: g.reached }
-    }
-    const percent = Math.min((this.config.progress / this.config.goalAmount) * 100, 100)
-    return { progress: this.config.progress, goal: this.config.goalAmount, percent, goalReached: this.config.goalReached }
-  },
-  async setGoal(value, type = null) {
-    if (this.config.multiGoals && type) this.goals[type].goal = value
-    else this.config.goalAmount = value
-    if (this.config.eventPeriod === "custom") await this._save(type)
-    const state = this.getState(type)
-    if (this.onGoalUpdate) this.onGoalUpdate(state)
-    this._log("🎯 Goal set", state)
-    return { updated: true, ...state }
-  },
-  async setProgress(value, type = null) {
-    if (this.config.multiGoals && type) this.goals[type].progress = value
-    else this.config.progress = value
-    if (this.config.eventPeriod === "custom") await this._save(type)
-    const state = this.getState(type)
-    if (this.onGoalUpdate) this.onGoalUpdate(state)
-    this._log("📊 Progress set", state)
-    return { updated: true, ...state }
-  },
-  async reset(type = null) {
-    if (this.config.multiGoals && type) this.goals[type].progress = 0
-    else this.config.progress = 0
-    if (this.config.eventPeriod === "custom") await this._save(type)
-    const state = this.getState(type)
-    if (this.onGoalUpdate) this.onGoalUpdate(state)
-    this._log("🔄 Reset", state)
-    return { updated: true, ...state }
-  },
-  _incProgress(val, type = null) {
-    if (this.config.multiGoals && type) this.goals[type].progress += val
-    else this.config.progress += val
-    this._checkGoal(type)
-  },
-  _setProgressInternal(val, type = null) {
-    if (this.config.multiGoals && type) this.goals[type].progress = val
-    else this.config.progress = val
-    this._checkGoal(type)
-  },
-  _checkGoal(type = null) {
-    if (this.config.multiGoals && type) {
-      const g = this.goals[type]
-      if (g.progress >= g.goal && !g.reached) {
-        g.reached = true
-        this._applyGoalAction(type)
-      }
-    } else {
-      if (this.config.progress >= this.config.goalAmount && !this.config.goalReached) {
-        this.config.goalReached = true
-        this._applyGoalAction()
-      }
-    }
-  },
-  async _applyGoalAction(type = null) {
-    const action = this.config.goalReachedAction
-    if (this.config.multiGoals && type) {
-      const g = this.goals[type]
-      if (action === "reset") g.progress = 0
-      else if (action === "increase") g.goal += this.config.goalIncreaseAmount
-      else if (action === "stop") {}
-      g.reached = false
-      if (this.config.eventPeriod === "custom") await this._save(type)
-      if (this.onGoalReached) this.onGoalReached(this.getState(type))
-    } else {
-      if (action === "reset") this.config.progress = 0
-      else if (action === "increase") this.config.goalAmount += this.config.goalIncreaseAmount
-      else if (action === "stop") {}
-      this.config.goalReached = false
-      if (this.config.eventPeriod === "custom") await this._save()
-      if (this.onGoalReached) this.onGoalReached(this.getState())
-    }
-  },
-  async _save(type = null) {
-    const key = this.config.multiGoals && type ? `goalData_${type}` : `goalData_${this.config.eventType}`
-    const data = this.config.multiGoals && type
-      ? { goalAmount: this.goals[type].goal, progress: this.goals[type].progress }
-      : { goalAmount: this.config.goalAmount, progress: this.config.progress }
-    try {
-      await SE_API.store.set(key, data)
-      if (this.onGoalSaved) this.onGoalSaved({ ...data, key })
-      this._log("💾 Saved", data)
-    } catch (e) {
-      this._log("❌ Save error", e)
-    }
-  },
-  async _load(type = null) {
-    const key = this.config.multiGoals && type ? `goalData_${type}` : `goalData_${this.config.eventType}`
-    try {
-      const data = await SE_API.store.get(key)
-      if (data && Object.keys(data).length > 0) {
-        if (this.config.multiGoals && type) {
-          this.goals[type].goal = data.goalAmount
-          this.goals[type].progress = data.progress
+    },
+
+    setupListeners() {
+      window.addEventListener("onEventReceived", GoalLib.onEventReceived);
+      window.addEventListener("onWidgetLoad", GoalLib.onWidgetLoad);
+    },
+
+    onWidgetLoad(obj) {
+      const s = GoalLib.state;
+      const data = obj?.detail?.session?.data || {};
+      const index = `${s.eventType}-${s.eventPeriod}`;
+      const entry = data[index] || {};
+
+      if (s.eventPeriod !== "custom") {
+        if (s.eventType === "tip" || s.eventType === "cheer") {
+          s.progress = Number(entry.amount) || 0;
         } else {
-          this.config.goalAmount = data.goalAmount
-          this.config.progress = data.progress
+          s.progress = Number(entry.count) || 0;
         }
-        this._log("📥 Loaded", data)
-      } else await this._save(type)
-    } catch {
-      await this._save(type)
-    }
-  },
-  _log(label, data) {
-    if (!this.config.debug) return
-    const tag = `%c[${this.config.logTag}]`
-    const labelStyle = "background:linear-gradient(90deg,#9A6BFF,#FA99FF);color:#fff;padding:2px 6px;border-radius:4px;font-weight:bold;"
-    const textStyle = "color:#FFD6FF;font-weight:bold;"
-    console.log(`${tag} %c${label}`, labelStyle, textStyle, data)
-  }
-}
+      }
+      GoalLib.update();
+    },
+
+    async onEventReceived(obj) {
+      const listener = obj?.detail?.listener;
+      const data = obj?.detail?.event || {};
+
+      // Always visible system
+      if (GoalLib.state.alwaysVisible) {
+        GoalLib.applyVisibility(true);
+        clearTimeout(GoalLib.alwaysVisibleTimer);
+        GoalLib.alwaysVisibleTimer = setTimeout(() => {
+          GoalLib.applyVisibility(false);
+        }, 10000);
+      }
+
+      if (listener === "message") {
+        const message = data.renderedText?.trim() || "";
+        if (!message.toLowerCase().startsWith(GoalLib.state.baseCommand)) return;
+        const role = GoalLib.getUserRole(data);
+        if (!GoalLib.state.roles.includes(role)) {
+          GoalLib.log("Role not allowed:", role);
+          return;
+        }
+        GoalLib.handleCommand(message);
+        return;
+      }
+
+      // Standard StreamElements events
+      const s = GoalLib.state;
+      const amount = Number(data.amount) || 0;
+      const gift = data.bulkGifted;
+      if (listener === "subscriber-latest" && s.eventType === "subscriber") {
+        const isResub = data.amount > 1 || data.cumulativeMonths > 1;
+        if (!s.resubs && isResub && gift !== true) return;
+        s.progress++;
+      } else if (listener === "follower-latest" && s.eventType === "follower") {
+        s.progress++;
+      } else if (listener === "tip-latest" && s.eventType === "tip") {
+        s.progress += amount;
+      } else if (listener === "cheer-latest" && s.eventType === "cheer") {
+        s.progress += amount;
+      }
+
+      GoalLib.update();
+      if (s.eventPeriod === "custom") GoalLib.save();
+    },
+
+    getUserRole(data) {
+      let role = "viewer";
+      const badges = data.data?.badges || [];
+      if (Array.isArray(badges)) {
+        const list = badges.map((b) => b.type);
+        if (list.includes("broadcaster")) role = "broadcaster";
+        else if (list.includes("mod")) role = "mod";
+        else if (list.includes("vip")) role = "vip";
+        else if (list.includes("subscriber") || list.includes("founder"))
+          role = "subscriber";
+        else if (list.includes("artist-badge")) role = "artist";
+      } else if (data.data?.tags?.badges) {
+        const list = data.data.tags.badges
+          .split(",")
+          .map((b) => b.split("/")[0]);
+        if (list.includes("broadcaster")) role = "broadcaster";
+        else if (list.includes("mod")) role = "mod";
+        else if (list.includes("vip")) role = "vip";
+        else if (list.includes("subscriber") || list.includes("founder"))
+          role = "subscriber";
+        else if (list.includes("artist-badge")) role = "artist";
+      }
+      return role;
+    },
+
+    handleCommand(msg) {
+      const s = GoalLib.state;
+      const args = msg.slice(s.baseCommand.length).trim().split(/\s+/);
+      const command = args.shift()?.toLowerCase() || "";
+      const val = parseInt(args[0], 10);
+
+      GoalLib.log("Command:", command, args);
+
+      switch (command) {
+        case "progress":
+          if (!isNaN(val)) GoalLib.updateProgress(val);
+          break;
+        case "goal":
+          if (!isNaN(val)) GoalLib.updateGoal(val);
+          break;
+        case "increase":
+          if (!isNaN(val)) GoalLib.increaseGoal(val);
+          break;
+        case "reset":
+          const type = args[0]?.toLowerCase();
+          if (type === "all") GoalLib.resetAll(s.baseGoal);
+          else if (type === "goal") GoalLib.resetGoal(s.baseGoal);
+          else if (type === "progress") GoalLib.resetProgress();
+          break;
+        case "title":
+          const newTitle = args.join(" ").replace(/^["']|["']$/g, "");
+          s.title = newTitle;
+          GoalLib.update();
+          break;
+        case "hide":
+          GoalLib.applyVisibility(false);
+          break;
+        case "show":
+          GoalLib.applyVisibility(true);
+          break;
+      }
+      if (s.eventPeriod === "custom") GoalLib.save();
+    },
+
+    update() {
+      const s = GoalLib.state;
+      const percent =
+        s.goalAmount > 0 ? Math.min((s.progress / s.goalAmount) * 100, 100) : 0;
+      GoalLib.emit("update", {
+        progress: s.progress,
+        goal: s.goalAmount,
+        percent,
+        title: s.title,
+        eventType: s.eventType,
+        visible: s.widgetVisible,
+      });
+      GoalLib.log(
+        `Progress updated → ${s.progress}/${s.goalAmount} (${percent.toFixed(
+          1
+        )}%)`
+      );
+      if (percent >= 100 && !s.goalReached) GoalLib.handleGoalReached();
+    },
+
+    async handleGoalReached() {
+      const s = GoalLib.state;
+      s.goalReached = true;
+      GoalLib.emit("goalReached", s);
+      GoalLib.log("Goal reached!");
+      switch (s.goalReachedAction) {
+        case "stop":
+          break;
+        case "increase":
+          await GoalLib.increaseGoal(s.goalIncreaseAmount);
+          s.goalReached = false;
+          break;
+        case "reset":
+          await GoalLib.resetAll(s.baseGoal);
+          s.goalReached = false;
+          break;
+      }
+      if (s.eventPeriod === "custom") GoalLib.save();
+    },
+
+    async save() {
+      const s = GoalLib.state;
+      const key = `GoalLib:${s.eventType}:${s.eventPeriod}`;
+      await SE_API.store.set(key, {
+        goalAmount: s.goalAmount,
+        progress: s.progress,
+        title: s.title,
+        widgetVisible: s.widgetVisible,
+      });
+      GoalLib.emit("save", s);
+      GoalLib.log("Custom save stored");
+    },
+
+    async load() {
+      const s = GoalLib.state;
+      const key = `GoalLib:${s.eventType}:${s.eventPeriod}`;
+      const data = await SE_API.store.get(key);
+      if (data) {
+        s.goalAmount = Number(data.goalAmount) || s.goalAmount;
+        s.progress = Number(data.progress) || 0;
+        s.title = data.title || s.title;
+        s.widgetVisible = data.widgetVisible !== false;
+        GoalLib.log("Custom data loaded");
+      } else {
+        await GoalLib.save();
+      }
+      GoalLib.update();
+    },
+
+    updateProgress(value) {
+      GoalLib.state.progress = value;
+      GoalLib.update();
+    },
+
+    updateGoal(value) {
+      GoalLib.state.goalAmount = value;
+      GoalLib.update();
+    },
+
+    async increaseGoal(amount) {
+      GoalLib.state.goalAmount += amount;
+      GoalLib.update();
+      await GoalLib.save();
+    },
+
+    async resetGoal(value) {
+      GoalLib.state.goalAmount = value;
+      GoalLib.update();
+      await GoalLib.save();
+    },
+
+    async resetProgress() {
+      GoalLib.state.progress = 0;
+      GoalLib.update();
+      await GoalLib.save();
+    },
+
+    async resetAll(value = 0) {
+      GoalLib.state.goalAmount = value;
+      GoalLib.state.progress = 0;
+      GoalLib.update();
+      await GoalLib.save();
+    },
+
+    applyVisibility(state) {
+      GoalLib.state.widgetVisible = state;
+      GoalLib.emit("visibilityChange", state);
+      GoalLib.log("Visibility:", state ? "shown" : "hidden");
+      if (GoalLib.state.eventPeriod === "custom") GoalLib.save();
+    },
+  };
+
+  global.GoalLib = GoalLib;
+})(typeof window !== "undefined" ? window : globalThis);
