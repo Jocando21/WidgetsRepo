@@ -64,6 +64,8 @@ export class HoroscopeGenerator {
   generate(signOrDate, type = "daily", seed = null) {
     if (!this.data) throw new Error("Horoscope data not loaded")
 
+    if (type === "year" || type === "yearly") type = "annual"
+
     const sign =
       typeof signOrDate === "string" && !signOrDate.includes("-")
         ? signOrDate.toLowerCase()
